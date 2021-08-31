@@ -31,10 +31,39 @@
 #include "ImageBuffer_Native.h"
 #include "ImageIO.h"
 #include "itkKernelImageFilter.h"
+#include "itkFlatStructuringElement.h"
 
-namespace fs = std::filesystem;
 
 #include "itkCommand.h"
+
+constexpr unsigned int Dimension = 2;
+using BinaryImageType = itk::Image<unsigned char, Dimension>;
+using ShortPixelType = short;
+using Short2ImageType = itk::Image<ShortPixelType, Dimension>;
+using DoublePixelType = double;
+using Double2ImageType = itk::Image<DoublePixelType, 2>;
+using TransformType = itk::Euler2DTransform<double>;
+using OptimizerType = itk::RegularStepGradientDescentOptimizerv4<double>;
+using MetricType =
+itk::MeanSquaresImageToImageMetricv4<Double2ImageType, Double2ImageType>;
+using RegistrationType = itk::
+ImageRegistrationMethodv4<Double2ImageType, Double2ImageType, TransformType>;
+using MaskType = itk::ImageMaskSpatialObject<Dimension>;
+using CompositeTransformType = itk::CompositeTransform<double, Dimension>;
+
+using TransformInitializerType =
+itk::CenteredTransformInitializer<TransformType,
+    Double2ImageType,
+    Double2ImageType>;
+//using myCommandType = RegistrationInterfaceCommand<RegistrationType>;
+using ResampleFilterType =
+itk::ResampleImageFilter<Double2ImageType, Double2ImageType>;
+using OutputPixelType = short;
+using OutputImageType = itk::Image<OutputPixelType, Dimension>;
+using CastFilterType =
+itk::CastImageFilter<Double2ImageType, OutputImageType>;
+using WriterType = itk::ImageFileWriter<BinaryImageType>;
+
 template <typename TRegistration>
 class RegistrationInterfaceCommand : public itk::Command
 {
@@ -132,146 +161,135 @@ private:
     unsigned int m_CumulativeIterationIndex{ 0 };
 };
 
-extern "C" __declspec(dllexport) int itkMotionCorrection(ImageBuffer fixedBuffer, ImageBuffer movingBuffer, ImageBuffer correctedBuffer,
-    float widthScale, float heightScale)
-{    
-    constexpr unsigned int Dimension = 2;
-    using ShortPixelType  = short;
-    using Short2ImageType = itk::Image<ShortPixelType, Dimension>;
-    
-    const size_t totalNumberOfPixels = (size_t)fixedBuffer.Size.Width * (size_t)fixedBuffer.Size.Height;
-    if (fixedBuffer.Pitch != fixedBuffer.Size.Width * PixelFormatUtils::PixelFormatBytesPerPixel(fixedBuffer.Format))
-        throw std::exception("Buffer must be with Pitch = Width * PixelSize");
 
+BinaryImageType::Pointer DilateImage(BinaryImageType::Pointer sourceImage, int ballRadius)
+{
+    using StructuringElementType = itk::FlatStructuringElement< Dimension >;
+    StructuringElementType::RadiusType radius;
+    radius.Fill(ballRadius);
+    StructuringElementType structuringElement = StructuringElementType::Ball(radius);
+
+    using BinaryDilateImageFilterType = itk::BinaryDilateImageFilter<BinaryImageType, BinaryImageType, StructuringElementType>;
+
+    BinaryDilateImageFilterType::Pointer dilateFilter = BinaryDilateImageFilterType::New();
+    dilateFilter->SetInput(sourceImage);
+    dilateFilter->SetKernel(structuringElement);
+    dilateFilter->SetForegroundValue(255); 
+    dilateFilter->Update();
+
+    return dilateFilter->GetOutput();
+}
+
+Double2ImageType::Pointer CastImageShortDouble(Short2ImageType::Pointer source)
+{
+    using CastFilter = itk::CastImageFilter<Short2ImageType, Double2ImageType>;
+    auto caster = CastFilter::New();
+    caster->SetInput(source);
+    caster->Update();
+    return caster->GetOutput();
+}
+
+Short2ImageType::Pointer GetITKImageFromBuffer(ImageBuffer buffer, float widthScale, float heightScale)
+{
     float correctSpacing[Dimension] = { widthScale, heightScale };
     ImageIO<ShortPixelType> importerImage;
-    auto fixedImage = importerImage.Import(fixedBuffer);
-    fixedImage->SetSpacing(correctSpacing);
-    auto movingImage = importerImage.Import(movingBuffer);
-    movingImage->SetSpacing(correctSpacing);
 
-    using DoublePixelType = double;
-    using Double2ImageType = itk::Image<DoublePixelType, 2>;
-    using CastShortDouble = itk::CastImageFilter<Short2ImageType, Double2ImageType>;
-    CastShortDouble::Pointer castFixedShortDouble = CastShortDouble::New();
-    castFixedShortDouble->SetInput(fixedImage); 
-    castFixedShortDouble->Update();
-    CastShortDouble::Pointer castMovingShortDouble = CastShortDouble::New();
-    castMovingShortDouble->SetInput(movingImage);
-    castMovingShortDouble->Update();
+    auto itkImage = importerImage.Import(buffer);
+    itkImage->SetSpacing(correctSpacing);
+    return itkImage;
+}
 
-    using BinaryImageType = itk::Image<unsigned char, 2>;
-    BinaryImageType::Pointer maskFixed = BinaryImageType::New();
-    maskFixed->SetRegions(fixedImage->GetLargestPossibleRegion());
-    auto width = fixedImage->GetLargestPossibleRegion().GetSize()[0];
-    auto height = fixedImage->GetLargestPossibleRegion().GetSize()[1];
-    maskFixed->Allocate();
-    auto maskFixedPointer = maskFixed->GetBufferPointer();
-    auto fixedPointer = castFixedShortDouble->GetOutput()->GetBufferPointer();
+BinaryImageType::Pointer GetMask(itk::Image<short, 2>::Pointer source, short threshold)
+{
+    BinaryImageType::Pointer mask = BinaryImageType::New();
+    mask->SetRegions(source->GetLargestPossibleRegion());
+    auto width = source->GetLargestPossibleRegion().GetSize()[0];
+    auto height = source->GetLargestPossibleRegion().GetSize()[1];
+    mask->Allocate();
+
+    auto maskPointer = mask->GetBufferPointer();
+    auto sourcePointer = source->GetBufferPointer();
 
     for (int i = 0; i < width; ++i)
     {
         for (int j = 0; j < height; ++j)
         {
-            if (*(fixedPointer + i + j * width) > 125.)
-                *(maskFixedPointer + i + j * width) = 255;
+            if (*(sourcePointer + i + j * width) > threshold)
+                *(maskPointer + i + j * width) = 255;
             else
-                *(maskFixedPointer + i + j * width) = 0;
+                *(maskPointer + i + j * width) = 0;
         }
     }
+
+    return mask;
+}
+
+void CheckPitchCorrection(ImageBuffer buffer)
+{
+    const size_t totalNumberOfPixels = (size_t)buffer.Size.Width * (size_t)buffer.Size.Height;
+    if (buffer.Pitch != buffer.Size.Width * PixelFormatUtils::PixelFormatBytesPerPixel(buffer.Format))
+        throw std::exception("Buffer must be with Pitch = Width * PixelSize");
+}
+
+OptimizerType::Pointer GetOptimizer()
+{
+    OptimizerType::Pointer optimizer = OptimizerType::New();
     
-    BinaryImageType::Pointer maskMoving = BinaryImageType::New();
-    maskMoving->SetRegions(fixedImage->GetLargestPossibleRegion());
-    maskMoving->Allocate();
-    auto maskMovingPointer = maskMoving->GetBufferPointer();
-    auto movingPointer = castMovingShortDouble->GetOutput()->GetBufferPointer();
-    for (int i = 0; i < width; ++i)
-    {
-        for (int j = 0; j < height; ++j)
-        {
-            if (*(movingPointer + i + j * width) > 125.)
-                *(maskMovingPointer + i + j * width) = 255;
-            else
-                *(maskMovingPointer + i + j * width) = 0;
-        }
-    }
+    optimizer->SetLearningRate(0.1);
+    optimizer->SetNumberOfIterations(500);
+    optimizer->SetRelaxationFactor(0.5);
+    optimizer->SetMinimumStepLength(0.0001);
+    
+    CommandIterationUpdate::Pointer observer = CommandIterationUpdate::New();
+    optimizer->AddObserver(itk::IterationEvent(), observer);
 
-    //typedef itk::FlatStructuringElement< Dimension > StructuringElementType;
-    //StructuringElementType::RadiusType radius;
-    //radius.Fill(5);
-    //StructuringElementType structuringElement = StructuringElementType::Ball(radius);
-    //
-    //using BinaryDilateImageFilterType = itk::BinaryDilateImageFilter<BinaryImageType, BinaryImageType, StructuringElementType>;
+    return optimizer;
+}
 
-    //BinaryDilateImageFilterType::Pointer dilateFilter = BinaryDilateImageFilterType::New();
-    //dilateFilter->SetInput(maskFixed);
-    //dilateFilter->SetKernel(structuringElement);
-    //dilateFilter->SetForegroundValue(255); // Value to dilate
-    //dilateFilter->Update();
-
-    //dilateFilter->SetInput(maskMoving);
-    //dilateFilter->Update();
-
-    using TransformType = itk::Euler2DTransform<double>;
-    using OptimizerType = itk::RegularStepGradientDescentOptimizerv4<double>;
-    using MetricType =
-        itk::MeanSquaresImageToImageMetricv4<Double2ImageType, Double2ImageType>;
-    using RegistrationType = itk::
-        ImageRegistrationMethodv4<Double2ImageType, Double2ImageType, TransformType>;
-
-    TransformType::Pointer    transform = TransformType::New();
-    OptimizerType::Pointer    optimizer = OptimizerType::New();
+MetricType::Pointer GetMetric(BinaryImageType::Pointer maskFixed, BinaryImageType::Pointer maskMoving)
+{
     MetricType::Pointer       metric = MetricType::New();
-    RegistrationType::Pointer registration = RegistrationType::New();
 
-    registration->SetOptimizer(optimizer);
-    registration->SetMetric(metric);
-
-
-    registration->SetFixedImage(castFixedShortDouble->GetOutput());
-    registration->SetMovingImage(castMovingShortDouble->GetOutput());
-    
-    using MaskType = itk::ImageMaskSpatialObject<Dimension>;
     MaskType::Pointer spatialObjectMaskFixed = MaskType::New();
-    spatialObjectMaskFixed->SetImage(maskFixed); 
+    spatialObjectMaskFixed->SetImage(maskFixed);
     spatialObjectMaskFixed->Update();
     metric->SetFixedImageMask(spatialObjectMaskFixed);
-
+    
     MaskType::Pointer spatialObjectMaskMoving = MaskType::New();
     spatialObjectMaskMoving->SetImage(maskMoving);
     spatialObjectMaskMoving->Update();
     metric->SetMovingImageMask(spatialObjectMaskMoving);
 
-    using CompositeTransformType = itk::CompositeTransform<double, Dimension>;
-    CompositeTransformType::Pointer compositeTransform =
-        CompositeTransformType::New();
-    
+    return metric;
+}
 
-    using TransformInitializerType =
-        itk::CenteredTransformInitializer<TransformType,
-        Double2ImageType,
-        Double2ImageType>;
+TransformType::Pointer GetCenteredTransform(Double2ImageType::Pointer fixed, Double2ImageType::Pointer moving)
+{
+    TransformType::Pointer    transform = TransformType::New();
     TransformInitializerType::Pointer initializer =
         TransformInitializerType::New();
     initializer->SetTransform(transform);
-    initializer->SetFixedImage(castFixedShortDouble->GetOutput());
-    initializer->SetMovingImage(castMovingShortDouble->GetOutput());
+    initializer->SetFixedImage(fixed);
+    initializer->SetMovingImage(moving);
     initializer->MomentsOn();
     initializer->InitializeTransform();
 
-    registration->SetInitialTransform(transform);
-    registration->InPlaceOn();
+    return transform;
+}
 
-    optimizer->SetLearningRate(0.1);
-    optimizer->SetNumberOfIterations(200);
-    optimizer->SetRelaxationFactor(0.5);
-    optimizer->SetMinimumStepLength(0.0001);
+RegistrationType::Pointer GetRegistration(OptimizerType::Pointer optimizer, MetricType::Pointer metric,
+    Double2ImageType::Pointer fixedDouble, Double2ImageType::Pointer movingDouble,
+    TransformType::Pointer transform)
+{
+    RegistrationType::Pointer registration = RegistrationType::New();
 
-    CommandIterationUpdate::Pointer observer = CommandIterationUpdate::New();
-    optimizer->AddObserver(itk::IterationEvent(), observer);
-    
+    registration->SetOptimizer(optimizer);
+    registration->SetMetric(metric);
+
+    registration->SetFixedImage(fixedDouble);
+    registration->SetMovingImage(movingDouble);
+
     constexpr unsigned int numberOfLevels = 4;
-
     RegistrationType::ShrinkFactorsArrayType shrinkFactorsPerLevel;
     shrinkFactorsPerLevel.SetSize(numberOfLevels);
     shrinkFactorsPerLevel[0] = 8;
@@ -289,15 +307,83 @@ extern "C" __declspec(dllexport) int itkMotionCorrection(ImageBuffer fixedBuffer
     registration->SetNumberOfLevels(numberOfLevels);
     registration->SetShrinkFactorsPerLevel(shrinkFactorsPerLevel);
     registration->SetSmoothingSigmasPerLevel(smoothingSigmasPerLevel);
-    
-    using CommandType = RegistrationInterfaceCommand<RegistrationType>;
-    CommandType::Pointer command = CommandType::New();
+
+    //myCommandType::Pointer command = myCommandType::New();
+    RegistrationInterfaceCommand<RegistrationType>::Pointer command =
+        RegistrationInterfaceCommand<RegistrationType>::New();
     registration->AddObserver(itk::MultiResolutionIterationEvent(), command);
 
+    return registration;
+}
+
+Double2ImageType::Pointer ResampleImage(Double2ImageType::Pointer movingDouble, TransformType::Pointer transform)
+{
+    ResampleFilterType::Pointer resampler = ResampleFilterType::New();
+    resampler->SetTransform(transform);
+    resampler->SetInput(movingDouble);
+
+    resampler->SetSize(movingDouble->GetLargestPossibleRegion().GetSize());
+    resampler->SetOutputOrigin(movingDouble->GetOrigin());
+    resampler->SetOutputSpacing(movingDouble->GetSpacing());
+    resampler->SetOutputDirection(movingDouble->GetDirection());
+
+    return resampler->GetOutput();
+}
+
+Short2ImageType::Pointer CastImageDoubleShort(Double2ImageType::Pointer source)
+{
+    using CastFilter = itk::CastImageFilter<Double2ImageType, Short2ImageType>;
+    auto caster = CastFilter::New();
+    caster->SetInput(source);
+    caster->Update();
+    return caster->GetOutput();
+}
+
+void CopyFromImageToBuffer(Short2ImageType::Pointer castedImage, ImageBuffer correctedBuffer)
+{
+    auto pointerToCastedImage = castedImage->GetBufferPointer();
+
+    for (int i = 0; i < correctedBuffer.Size.Width; ++i)
+        for (int j = 0; j < correctedBuffer.Size.Height; ++j)
+            correctedBuffer.Set(i, j, *(pointerToCastedImage + i + j * correctedBuffer.Size.Width));
+}
+
+extern "C" __declspec(dllexport) int itkMotionCorrection(ImageBuffer fixedBuffer, ImageBuffer movingBuffer, ImageBuffer correctedBuffer,
+    float widthScale, float heightScale, short threshold)
+{   
+    CheckPitchCorrection(fixedBuffer);
+    CheckPitchCorrection(movingBuffer);
+
+    auto fixedImage = GetITKImageFromBuffer(fixedBuffer, widthScale, heightScale);
+    auto movingImage = GetITKImageFromBuffer(movingBuffer, widthScale, heightScale);
+
+    auto maskFixed = GetMask(fixedImage, threshold);
+    auto maskMoving = GetMask(movingImage, threshold);
+
+    WriterType::Pointer writer = WriterType::New();
+    writer->SetInput(maskFixed);
+    writer->SetFileName("maskFixed.png");
+    writer->Update();
+    writer->SetInput(maskMoving);
+    writer->SetFileName("maskMoving.png");
+    writer->Update();
+
+    auto fixedDouble = CastImageShortDouble(fixedImage);
+    auto movingDouble = CastImageShortDouble(movingImage);
+    
+    
+    auto optimizer = GetOptimizer();
+    auto metric = GetMetric(maskFixed, maskMoving);
+    auto transform = GetCenteredTransform(fixedDouble, movingDouble);
+    
+    auto registration = GetRegistration(optimizer,
+                                        metric,
+                                        fixedDouble,
+                                        movingDouble,
+                                        transform);
     try
     {
         registration->Update();
-        compositeTransform->AddTransform(registration->GetModifiableTransform());
         std::cout << "Optimizer stop condition: "
             << registration->GetOptimizer()->GetStopConditionDescription()
             << std::endl;
@@ -309,35 +395,10 @@ extern "C" __declspec(dllexport) int itkMotionCorrection(ImageBuffer fixedBuffer
         return EXIT_FAILURE;
     }
 
-    using ResampleFilterType =
-        itk::ResampleImageFilter<Double2ImageType, Double2ImageType>;
-    ResampleFilterType::Pointer resample = ResampleFilterType::New();
-    resample->SetTransform(compositeTransform);
-    resample->SetInput(castMovingShortDouble->GetOutput());
-
-    Double2ImageType::Pointer fixedImageTemp = castFixedShortDouble->GetOutput();
-    resample->SetSize(fixedImageTemp->GetLargestPossibleRegion().GetSize());
-    resample->SetOutputOrigin(fixedImageTemp->GetOrigin());
-    resample->SetOutputSpacing(fixedImageTemp->GetSpacing());
-    resample->SetOutputDirection(fixedImageTemp->GetDirection());
+    auto resampledImage = ResampleImage(movingDouble, registration->GetModifiableTransform());
+    auto castedImage = CastImageDoubleShort(resampledImage);
     
-    using OutputPixelType = short;
-    using OutputImageType = itk::Image<OutputPixelType, Dimension>;
-    using CastFilterType =
-        itk::CastImageFilter<Double2ImageType, OutputImageType>;
-    CastFilterType::Pointer caster = CastFilterType::New();
-
-    caster->SetInput(resample->GetOutput());
-    caster->Update();
-    auto pointerToCastedImage = caster->GetOutput()->GetBufferPointer();
-
-    for (int i = 0; i < correctedBuffer.Size.Width; ++i)
-    {
-        for (int j = 0; j < correctedBuffer.Size.Height; ++j)
-        {
-            correctedBuffer.Set(i, j, *(pointerToCastedImage + i + j * correctedBuffer.Size.Width) );
-        }
-    }
+    CopyFromImageToBuffer(castedImage, correctedBuffer);
 
     return 0;
 }
