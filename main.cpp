@@ -13,21 +13,24 @@
 
 #include "itkMeanSquaresImageToImageMetricv4.h"
 #include "itkMutualInformationHistogramImageToImageMetric.h"
-#include "itkRescaleIntensityImageFilter.h"
 
 #include "itkRegularStepGradientDescentOptimizerv4.h"
-#include <itkGradientDescentOptimizer.h>
-#include <itkConjugateGradientLineSearchOptimizerv4.h>
+#include "itkGradientDescentOptimizer.h"
+#include "itkConjugateGradientLineSearchOptimizerv4.h"
 
+#include <itkImageMaskSpatialObject.h>
 #include "itkImageFileReader.h"
 #include "itkImageFileWriter.h"
 
+#include <itkBinaryDilateImageFilter.h>
+#include "itkMaskImageFilter.h"
+#include "itkRescaleIntensityImageFilter.h"
 #include "itkImportImageFilter.h"
 #include "itkSubtractImageFilter.h"
 
 #include "ImageBuffer_Native.h"
 #include "ImageIO.h"
-//#include "C:\Users\owchi\source\repos\dev3\Native\Alda.Native.Run\ImageIO.h"
+#include "itkKernelImageFilter.h"
 
 namespace fs = std::filesystem;
 
@@ -157,12 +160,62 @@ extern "C" __declspec(dllexport) int itkMotionCorrection(ImageBuffer fixedBuffer
     castMovingShortDouble->SetInput(movingImage);
     castMovingShortDouble->Update();
 
-    //using TransformType = itk::Euler2DTransform<double>;
-    using TransformType = itk::Similarity2DTransform<double>;
+    using BinaryImageType = itk::Image<unsigned char, 2>;
+    BinaryImageType::Pointer maskFixed = BinaryImageType::New();
+    maskFixed->SetRegions(fixedImage->GetLargestPossibleRegion());
+    auto width = fixedImage->GetLargestPossibleRegion().GetSize()[0];
+    auto height = fixedImage->GetLargestPossibleRegion().GetSize()[1];
+    maskFixed->Allocate();
+    auto maskFixedPointer = maskFixed->GetBufferPointer();
+    auto fixedPointer = castFixedShortDouble->GetOutput()->GetBufferPointer();
+
+    for (int i = 0; i < width; ++i)
+    {
+        for (int j = 0; j < height; ++j)
+        {
+            if (*(fixedPointer + i + j * width) > 125.)
+                *(maskFixedPointer + i + j * width) = 255;
+            else
+                *(maskFixedPointer + i + j * width) = 0;
+        }
+    }
+    
+    BinaryImageType::Pointer maskMoving = BinaryImageType::New();
+    maskMoving->SetRegions(fixedImage->GetLargestPossibleRegion());
+    maskMoving->Allocate();
+    auto maskMovingPointer = maskMoving->GetBufferPointer();
+    auto movingPointer = castMovingShortDouble->GetOutput()->GetBufferPointer();
+    for (int i = 0; i < width; ++i)
+    {
+        for (int j = 0; j < height; ++j)
+        {
+            if (*(movingPointer + i + j * width) > 125.)
+                *(maskMovingPointer + i + j * width) = 255;
+            else
+                *(maskMovingPointer + i + j * width) = 0;
+        }
+    }
+
+    //typedef itk::FlatStructuringElement< Dimension > StructuringElementType;
+    //StructuringElementType::RadiusType radius;
+    //radius.Fill(5);
+    //StructuringElementType structuringElement = StructuringElementType::Ball(radius);
+    //
+    //using BinaryDilateImageFilterType = itk::BinaryDilateImageFilter<BinaryImageType, BinaryImageType, StructuringElementType>;
+
+    //BinaryDilateImageFilterType::Pointer dilateFilter = BinaryDilateImageFilterType::New();
+    //dilateFilter->SetInput(maskFixed);
+    //dilateFilter->SetKernel(structuringElement);
+    //dilateFilter->SetForegroundValue(255); // Value to dilate
+    //dilateFilter->Update();
+
+    //dilateFilter->SetInput(maskMoving);
+    //dilateFilter->Update();
+
+    using TransformType = itk::Euler2DTransform<double>;
     using OptimizerType = itk::RegularStepGradientDescentOptimizerv4<double>;
     using MetricType =
-        itk::MeanSquaresImageToImageMetricv4<Double2ImageType,
-        Double2ImageType>;
+        itk::MeanSquaresImageToImageMetricv4<Double2ImageType, Double2ImageType>;
     using RegistrationType = itk::
         ImageRegistrationMethodv4<Double2ImageType, Double2ImageType, TransformType>;
 
@@ -174,8 +227,20 @@ extern "C" __declspec(dllexport) int itkMotionCorrection(ImageBuffer fixedBuffer
     registration->SetOptimizer(optimizer);
     registration->SetMetric(metric);
 
+
     registration->SetFixedImage(castFixedShortDouble->GetOutput());
     registration->SetMovingImage(castMovingShortDouble->GetOutput());
+    
+    using MaskType = itk::ImageMaskSpatialObject<Dimension>;
+    MaskType::Pointer spatialObjectMaskFixed = MaskType::New();
+    spatialObjectMaskFixed->SetImage(maskFixed); 
+    spatialObjectMaskFixed->Update();
+    metric->SetFixedImageMask(spatialObjectMaskFixed);
+
+    MaskType::Pointer spatialObjectMaskMoving = MaskType::New();
+    spatialObjectMaskMoving->SetImage(maskMoving);
+    spatialObjectMaskMoving->Update();
+    metric->SetMovingImageMask(spatialObjectMaskMoving);
 
     using CompositeTransformType = itk::CompositeTransform<double, Dimension>;
     CompositeTransformType::Pointer compositeTransform =
@@ -200,7 +265,7 @@ extern "C" __declspec(dllexport) int itkMotionCorrection(ImageBuffer fixedBuffer
     optimizer->SetLearningRate(0.1);
     optimizer->SetNumberOfIterations(200);
     optimizer->SetRelaxationFactor(0.5);
-    optimizer->SetMinimumStepLength(0.01);
+    optimizer->SetMinimumStepLength(0.0001);
 
     CommandIterationUpdate::Pointer observer = CommandIterationUpdate::New();
     optimizer->AddObserver(itk::IterationEvent(), observer);
@@ -243,105 +308,6 @@ extern "C" __declspec(dllexport) int itkMotionCorrection(ImageBuffer fixedBuffer
         std::cout << err << std::endl;
         return EXIT_FAILURE;
     }
-
-    using ATransformType = itk::AffineTransform<double, Dimension>;
-    using AOptimizerType =
-        itk::ConjugateGradientLineSearchOptimizerv4Template<double>;
-    using ARegistrationType = itk::ImageRegistrationMethodv4<Double2ImageType,
-        Double2ImageType,
-        ATransformType>;
-
-    AOptimizerType::Pointer    affineOptimizer = AOptimizerType::New();
-    MetricType::Pointer        affineMetric = MetricType::New();
-    ARegistrationType::Pointer affineRegistration = ARegistrationType::New();
-
-    affineRegistration->SetOptimizer(affineOptimizer);
-    affineRegistration->SetMetric(affineMetric);
-
-    affineRegistration->SetFixedImage(castFixedShortDouble->GetOutput());
-    affineRegistration->SetMovingImage(castMovingShortDouble->GetOutput());
-    affineRegistration->SetMovingInitialTransform(compositeTransform);
-    affineRegistration->SetObjectName("AffineRegistration");
-
-    using FixedImageCalculatorType =
-        itk::ImageMomentsCalculator<Double2ImageType>;
-
-    FixedImageCalculatorType::Pointer fixedCalculator =
-        FixedImageCalculatorType::New();
-    fixedCalculator->SetImage(castFixedShortDouble->GetOutput());
-    fixedCalculator->Compute();
-    auto fixedCenter = fixedCalculator->GetCenterOfGravity();
-
-    ATransformType::Pointer affineTx = ATransformType::New();
-    const unsigned int numberOfFixedParameters =
-        affineTx->GetFixedParameters().Size();
-    ATransformType::ParametersType fixedParameters(numberOfFixedParameters);
-    for (unsigned int i = 0; i < numberOfFixedParameters; ++i)
-    {
-        fixedParameters[i] = fixedCenter[i];
-    }
-    affineTx->SetFixedParameters(fixedParameters);
-
-    affineRegistration->SetInitialTransform(affineTx);
-    affineRegistration->InPlaceOn();
-
-    using ScalesEstimatorType =
-        itk::RegistrationParameterScalesFromPhysicalShift<MetricType>;
-    ScalesEstimatorType::Pointer scalesEstimator = ScalesEstimatorType::New();
-    scalesEstimator->SetMetric(affineMetric);
-    scalesEstimator->SetTransformForward(true);
-
-    affineOptimizer->SetScalesEstimator(scalesEstimator);
-    affineOptimizer->SetDoEstimateLearningRateOnce(true);
-    affineOptimizer->SetDoEstimateLearningRateAtEachIteration(false);
-
-    affineOptimizer->SetLowerLimit(0);
-    affineOptimizer->SetUpperLimit(2);
-    affineOptimizer->SetEpsilon(0.2);
-    affineOptimizer->SetNumberOfIterations(200);
-    affineOptimizer->SetMinimumConvergenceValue(1e-6);
-    affineOptimizer->SetConvergenceWindowSize(5);
-
-    CommandIterationUpdate::Pointer observer2 = CommandIterationUpdate::New();
-    affineOptimizer->AddObserver(itk::IterationEvent(), observer2);
-
-    constexpr unsigned int numberOfLevels2 = 2;
-
-    ARegistrationType::ShrinkFactorsArrayType shrinkFactorsPerLevel2;
-    shrinkFactorsPerLevel2.SetSize(numberOfLevels2);
-    shrinkFactorsPerLevel2[0] = 2;
-    shrinkFactorsPerLevel2[1] = 1;
-
-    ARegistrationType::SmoothingSigmasArrayType smoothingSigmasPerLevel2;
-    smoothingSigmasPerLevel2.SetSize(numberOfLevels2);
-    smoothingSigmasPerLevel2[0] = 1;
-    smoothingSigmasPerLevel2[1] = 0;
-
-    affineRegistration->SetNumberOfLevels(numberOfLevels2);
-    affineRegistration->SetShrinkFactorsPerLevel(shrinkFactorsPerLevel2);
-    affineRegistration->SetSmoothingSigmasPerLevel(smoothingSigmasPerLevel2);
-
-    using AffineCommandType = RegistrationInterfaceCommand<ARegistrationType>;
-    AffineCommandType::Pointer command2 = AffineCommandType::New();
-    affineRegistration->AddObserver(itk::MultiResolutionIterationEvent(),
-        command2);
-
-    try
-    {
-        affineRegistration->Update();
-        compositeTransform->AddTransform(affineRegistration->GetModifiableTransform());
-        std::cout
-            << "Optimizer stop condition: "
-            << affineRegistration->GetOptimizer()->GetStopConditionDescription()
-            << std::endl;
-    }
-    catch (const itk::ExceptionObject& err)
-    {
-        std::cout << "ExceptionObject caught !" << std::endl;
-        std::cout << err << std::endl;
-        return EXIT_FAILURE;
-    }
-
 
     using ResampleFilterType =
         itk::ResampleImageFilter<Double2ImageType, Double2ImageType>;
