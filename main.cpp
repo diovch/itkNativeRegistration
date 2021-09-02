@@ -36,6 +36,7 @@
 
 #include "itkCommand.h"
 
+
 constexpr unsigned int Dimension = 2;
 using BinaryImageType = itk::Image<unsigned char, Dimension>;
 using ShortPixelType = short;
@@ -55,7 +56,9 @@ using TransformInitializerType =
 itk::CenteredTransformInitializer<TransformType,
     Double2ImageType,
     Double2ImageType>;
-//using myCommandType = RegistrationInterfaceCommand<RegistrationType>;
+
+
+
 using ResampleFilterType =
 itk::ResampleImageFilter<Double2ImageType, Double2ImageType>;
 using OutputPixelType = short;
@@ -121,6 +124,7 @@ public:
     }
 
 };
+using myCommandType = RegistrationInterfaceCommand<RegistrationType>;
 
 class CommandIterationUpdate : public itk::Command
 {
@@ -281,11 +285,14 @@ RegistrationType::Pointer GetRegistration(OptimizerType::Pointer optimizer, Metr
     Double2ImageType::Pointer fixedDouble, Double2ImageType::Pointer movingDouble,
     TransformType::Pointer transform)
 {
+    
+
     RegistrationType::Pointer registration = RegistrationType::New();
 
     registration->SetOptimizer(optimizer);
     registration->SetMetric(metric);
-
+    registration->SetInitialTransform(transform);
+    registration->InPlaceOn();
     registration->SetFixedImage(fixedDouble);
     registration->SetMovingImage(movingDouble);
 
@@ -308,24 +315,23 @@ RegistrationType::Pointer GetRegistration(OptimizerType::Pointer optimizer, Metr
     registration->SetShrinkFactorsPerLevel(shrinkFactorsPerLevel);
     registration->SetSmoothingSigmasPerLevel(smoothingSigmasPerLevel);
 
-    //myCommandType::Pointer command = myCommandType::New();
-    RegistrationInterfaceCommand<RegistrationType>::Pointer command =
-        RegistrationInterfaceCommand<RegistrationType>::New();
-    registration->AddObserver(itk::MultiResolutionIterationEvent(), command);
+    myCommandType::Pointer stageObserver = myCommandType::New();
+    registration->AddObserver(itk::MultiResolutionIterationEvent(), stageObserver);
 
     return registration;
 }
 
-Double2ImageType::Pointer ResampleImage(Double2ImageType::Pointer movingDouble, TransformType::Pointer transform)
+Double2ImageType::Pointer ResampleImage(Double2ImageType::Pointer ImageDouble, TransformType::Pointer transform)
 {
     ResampleFilterType::Pointer resampler = ResampleFilterType::New();
     resampler->SetTransform(transform);
-    resampler->SetInput(movingDouble);
+    resampler->SetInput(ImageDouble);
 
-    resampler->SetSize(movingDouble->GetLargestPossibleRegion().GetSize());
-    resampler->SetOutputOrigin(movingDouble->GetOrigin());
-    resampler->SetOutputSpacing(movingDouble->GetSpacing());
-    resampler->SetOutputDirection(movingDouble->GetDirection());
+    resampler->SetSize(ImageDouble->GetLargestPossibleRegion().GetSize());
+    resampler->SetOutputOrigin(ImageDouble->GetOrigin());
+    resampler->SetOutputSpacing(ImageDouble->GetSpacing());
+    resampler->SetOutputDirection(ImageDouble->GetDirection());
+    resampler->Update();
 
     return resampler->GetOutput();
 }
@@ -339,13 +345,16 @@ Short2ImageType::Pointer CastImageDoubleShort(Double2ImageType::Pointer source)
     return caster->GetOutput();
 }
 
-void CopyFromImageToBuffer(Short2ImageType::Pointer castedImage, ImageBuffer correctedBuffer)
+void CopyFromImageToBuffer(Short2ImageType::Pointer image, ImageBuffer buffer)
 {
-    auto pointerToCastedImage = castedImage->GetBufferPointer();
+    auto pointerToCastedImage = image->GetBufferPointer();
+    auto size = image->GetLargestPossibleRegion().GetSize();
+    auto width = size[0];
+    auto height = size[1];
 
-    for (int i = 0; i < correctedBuffer.Size.Width; ++i)
-        for (int j = 0; j < correctedBuffer.Size.Height; ++j)
-            correctedBuffer.Set(i, j, *(pointerToCastedImage + i + j * correctedBuffer.Size.Width));
+    for (int i = 0; i < width; ++i)
+        for (int j = 0; j < height; ++j)
+            buffer.Set(i, j, *(pointerToCastedImage + i + j * width));
 }
 
 extern "C" __declspec(dllexport) int itkMotionCorrection(ImageBuffer fixedBuffer, ImageBuffer movingBuffer, ImageBuffer correctedBuffer,
@@ -360,20 +369,20 @@ extern "C" __declspec(dllexport) int itkMotionCorrection(ImageBuffer fixedBuffer
     auto maskFixed = GetMask(fixedImage, threshold);
     auto maskMoving = GetMask(movingImage, threshold);
 
-    WriterType::Pointer writer = WriterType::New();
-    writer->SetInput(maskFixed);
-    writer->SetFileName("maskFixed.png");
-    writer->Update();
-    writer->SetInput(maskMoving);
-    writer->SetFileName("maskMoving.png");
-    writer->Update();
+    auto dilatedMaskFixed = DilateImage(maskFixed, 5);
+    auto dilatedMaskMoving = DilateImage(maskMoving, 5);
 
     auto fixedDouble = CastImageShortDouble(fixedImage);
     auto movingDouble = CastImageShortDouble(movingImage);
-    
+
+    using myWriteType = itk::ImageFileWriter<Double2ImageType>;
+    myWriteType::Pointer writer = myWriteType::New();
+    writer->SetInput(fixedDouble);
+    writer->SetFileName("fixedDouble.nii.gz");
+    writer->Update();
     
     auto optimizer = GetOptimizer();
-    auto metric = GetMetric(maskFixed, maskMoving);
+    auto metric = GetMetric(dilatedMaskFixed, dilatedMaskMoving);
     auto transform = GetCenteredTransform(fixedDouble, movingDouble);
     
     auto registration = GetRegistration(optimizer,
