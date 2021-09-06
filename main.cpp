@@ -33,6 +33,7 @@
 #include "itkKernelImageFilter.h"
 #include "itkFlatStructuringElement.h"
 
+#include <itkOptimizerParameterScalesEstimator.h>
 
 #include "itkCommand.h"
 
@@ -203,7 +204,7 @@ Short2ImageType::Pointer GetITKImageFromBuffer(ImageBuffer buffer, float widthSc
     return itkImage;
 }
 
-BinaryImageType::Pointer GetMask(itk::Image<short, 2>::Pointer source, short threshold)
+BinaryImageType::Pointer GetMask(Short2ImageType::Pointer source, short threshold)
 {
     BinaryImageType::Pointer mask = BinaryImageType::New();
     mask->SetRegions(source->GetLargestPossibleRegion());
@@ -235,11 +236,19 @@ void CheckPitchCorrection(ImageBuffer buffer)
         throw std::exception("Buffer must be with Pitch = Width * PixelSize");
 }
 
-OptimizerType::Pointer GetOptimizer()
+OptimizerType::Pointer GetOptimizer(MetricType::Pointer metric)
 {
     OptimizerType::Pointer optimizer = OptimizerType::New();
-    
+    using ScalesEstimatorType =
+        itk::RegistrationParameterScalesFromPhysicalShift<MetricType>;
+    ScalesEstimatorType::Pointer scalesEstimator = ScalesEstimatorType::New();
+    scalesEstimator->SetMetric(metric);
+    scalesEstimator->SetTransformForward(true);
+
+    optimizer->SetScalesEstimator(scalesEstimator);
+    optimizer->SetMetric(metric);
     optimizer->SetLearningRate(0.1);
+    
     optimizer->SetNumberOfIterations(500);
     optimizer->SetRelaxationFactor(0.5);
     optimizer->SetMinimumStepLength(0.0001);
@@ -374,15 +383,10 @@ extern "C" __declspec(dllexport) int itkMotionCorrection(ImageBuffer fixedBuffer
 
     auto fixedDouble = CastImageShortDouble(fixedImage);
     auto movingDouble = CastImageShortDouble(movingImage);
-
-    using myWriteType = itk::ImageFileWriter<Double2ImageType>;
-    myWriteType::Pointer writer = myWriteType::New();
-    writer->SetInput(fixedDouble);
-    writer->SetFileName("fixedDouble.nii.gz");
-    writer->Update();
     
-    auto optimizer = GetOptimizer();
+    
     auto metric = GetMetric(dilatedMaskFixed, dilatedMaskMoving);
+    auto optimizer = GetOptimizer(metric);
     auto transform = GetCenteredTransform(fixedDouble, movingDouble);
     
     auto registration = GetRegistration(optimizer,
