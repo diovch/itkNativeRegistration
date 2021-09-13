@@ -13,6 +13,8 @@
 
 #include "itkMeanSquaresImageToImageMetricv4.h"
 #include "itkMutualInformationHistogramImageToImageMetric.h"
+#include "itkMattesMutualInformationImageToImageMetricv4.h"
+#include "itkCorrelationImageToImageMetricv4.h"
 
 #include "itkRegularStepGradientDescentOptimizerv4.h"
 #include "itkGradientDescentOptimizer.h"
@@ -47,19 +49,15 @@ using Double2ImageType = itk::Image<DoublePixelType, 2>;
 using TransformType = itk::Euler2DTransform<double>;
 using OptimizerType = itk::RegularStepGradientDescentOptimizerv4<double>;
 using MetricType =
-itk::MeanSquaresImageToImageMetricv4<Double2ImageType, Double2ImageType>;
+itk::CorrelationImageToImageMetricv4<Double2ImageType, Double2ImageType>;
 using RegistrationType = itk::
 ImageRegistrationMethodv4<Double2ImageType, Double2ImageType, TransformType>;
 using MaskType = itk::ImageMaskSpatialObject<Dimension>;
 using CompositeTransformType = itk::CompositeTransform<double, Dimension>;
-
 using TransformInitializerType =
 itk::CenteredTransformInitializer<TransformType,
     Double2ImageType,
     Double2ImageType>;
-
-
-
 using ResampleFilterType =
 itk::ResampleImageFilter<Double2ImageType, Double2ImageType>;
 using OutputPixelType = short;
@@ -160,10 +158,12 @@ public:
         std::cout << optimizer->GetValue() << "   ";
         std::cout << optimizer->GetCurrentPosition() << "   ";
         std::cout << m_CumulativeIterationIndex++ << std::endl;
+        previous = optimizer->GetValue();
     }
 
 private:
     unsigned int m_CumulativeIterationIndex{ 0 };
+    double previous = 0.;
 };
 
 
@@ -247,7 +247,7 @@ OptimizerType::Pointer GetOptimizer(MetricType::Pointer metric)
 
     optimizer->SetScalesEstimator(scalesEstimator);
     optimizer->SetMetric(metric);
-    optimizer->SetLearningRate(0.1);
+    optimizer->SetLearningRate(0.01);
     
     optimizer->SetNumberOfIterations(500);
     optimizer->SetRelaxationFactor(0.5);
@@ -262,6 +262,13 @@ OptimizerType::Pointer GetOptimizer(MetricType::Pointer metric)
 MetricType::Pointer GetMetric(BinaryImageType::Pointer maskFixed, BinaryImageType::Pointer maskMoving)
 {
     MetricType::Pointer       metric = MetricType::New();
+
+    bool isMetricMutualInformation = false;
+    if (isMetricMutualInformation)
+    {
+        metric->SetUseMovingImageGradientFilter(false);
+        metric->SetUseFixedImageGradientFilter(false);
+    }
 
     MaskType::Pointer spatialObjectMaskFixed = MaskType::New();
     spatialObjectMaskFixed->SetImage(maskFixed);
@@ -294,8 +301,6 @@ RegistrationType::Pointer GetRegistration(OptimizerType::Pointer optimizer, Metr
     Double2ImageType::Pointer fixedDouble, Double2ImageType::Pointer movingDouble,
     TransformType::Pointer transform)
 {
-    
-
     RegistrationType::Pointer registration = RegistrationType::New();
 
     registration->SetOptimizer(optimizer);
@@ -366,14 +371,15 @@ void CopyFromImageToBuffer(Short2ImageType::Pointer image, ImageBuffer buffer)
             buffer.Set(i, j, *(pointerToCastedImage + i + j * width));
 }
 
-extern "C" __declspec(dllexport) int itkMotionCorrection(ImageBuffer fixedBuffer, ImageBuffer movingBuffer, ImageBuffer correctedBuffer,
-    float widthScale, float heightScale, short threshold)
+extern "C" __declspec(dllexport) int itkMotionCorrection(ImageBuffer fixedRescaledBuffer, ImageBuffer movingRescaledBuffer, 
+                                                         ImageBuffer movingSourceBuffer, ImageBuffer correctedBuffer,
+                                                        float widthScale, float heightScale, short threshold)
 {   
-    CheckPitchCorrection(fixedBuffer);
-    CheckPitchCorrection(movingBuffer);
+    CheckPitchCorrection(fixedRescaledBuffer);
+    CheckPitchCorrection(movingRescaledBuffer);
 
-    auto fixedImage = GetITKImageFromBuffer(fixedBuffer, widthScale, heightScale);
-    auto movingImage = GetITKImageFromBuffer(movingBuffer, widthScale, heightScale);
+    auto fixedImage = GetITKImageFromBuffer(fixedRescaledBuffer, widthScale, heightScale);
+    auto movingImage = GetITKImageFromBuffer(movingRescaledBuffer, widthScale, heightScale);
 
     auto maskFixed = GetMask(fixedImage, threshold);
     auto maskMoving = GetMask(movingImage, threshold);
@@ -383,7 +389,6 @@ extern "C" __declspec(dllexport) int itkMotionCorrection(ImageBuffer fixedBuffer
 
     auto fixedDouble = CastImageShortDouble(fixedImage);
     auto movingDouble = CastImageShortDouble(movingImage);
-    
     
     auto metric = GetMetric(dilatedMaskFixed, dilatedMaskMoving);
     auto optimizer = GetOptimizer(metric);
@@ -407,8 +412,11 @@ extern "C" __declspec(dllexport) int itkMotionCorrection(ImageBuffer fixedBuffer
         std::cout << err << std::endl;
         return EXIT_FAILURE;
     }
-
-    auto resampledImage = ResampleImage(movingDouble, registration->GetModifiableTransform());
+    
+    auto movingSource = GetITKImageFromBuffer(movingSourceBuffer, widthScale, heightScale);
+    auto movingSourceDouble = CastImageShortDouble(movingSource);
+    //auto resampledImage = ResampleImage(movingDouble, registration->GetModifiableTransform());
+    auto resampledImage = ResampleImage(movingSourceDouble, registration->GetModifiableTransform());
     auto castedImage = CastImageDoubleShort(resampledImage);
     
     CopyFromImageToBuffer(castedImage, correctedBuffer);
