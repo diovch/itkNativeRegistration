@@ -1,4 +1,3 @@
-//#include <filesystem>
 #include <stdexcept>
 #include <limits>
 
@@ -39,31 +38,34 @@
 
 #include "itkCommand.h"
 
-
 constexpr unsigned int Dimension = 2;
 using BinaryImageType = itk::Image<unsigned char, Dimension>;
 using ShortPixelType = short;
 using Short2ImageType = itk::Image<ShortPixelType, Dimension>;
+
 using DoublePixelType = double;
 using Double2ImageType = itk::Image<DoublePixelType, 2>;
 using TransformType = itk::Euler2DTransform<double>;
 using OptimizerType = itk::RegularStepGradientDescentOptimizerv4<double>;
+
 using MetricType =
-itk::CorrelationImageToImageMetricv4<Double2ImageType, Double2ImageType>;
-using RegistrationType = itk::
-ImageRegistrationMethodv4<Double2ImageType, Double2ImageType, TransformType>;
+            itk::CorrelationImageToImageMetricv4<Double2ImageType, Double2ImageType>;
+using RegistrationType = 
+        itk::ImageRegistrationMethodv4<Double2ImageType, Double2ImageType, TransformType>;
 using MaskType = itk::ImageMaskSpatialObject<Dimension>;
+
 using CompositeTransformType = itk::CompositeTransform<double, Dimension>;
 using TransformInitializerType =
-itk::CenteredTransformInitializer<TransformType,
-    Double2ImageType,
-    Double2ImageType>;
+                        itk::CenteredTransformInitializer<TransformType,
+                            Double2ImageType,
+                            Double2ImageType>;
 using ResampleFilterType =
-itk::ResampleImageFilter<Double2ImageType, Double2ImageType>;
+                    itk::ResampleImageFilter<Double2ImageType, Double2ImageType>;
+
 using OutputPixelType = short;
 using OutputImageType = itk::Image<OutputPixelType, Dimension>;
 using CastFilterType =
-itk::CastImageFilter<Double2ImageType, OutputImageType>;
+                    itk::CastImageFilter<Double2ImageType, OutputImageType>;
 using WriterType = itk::ImageFileWriter<BinaryImageType>;
 
 template <typename TRegistration>
@@ -123,6 +125,7 @@ public:
     }
 
 };
+
 using myCommandType = RegistrationInterfaceCommand<RegistrationType>;
 
 class CommandIterationUpdate : public itk::Command
@@ -261,9 +264,9 @@ OptimizerType::Pointer GetOptimizer(MetricType::Pointer metric)
 
 MetricType::Pointer GetMetric(BinaryImageType::Pointer maskFixed, BinaryImageType::Pointer maskMoving)
 {
-    MetricType::Pointer       metric = MetricType::New();
-
+    MetricType::Pointer metric = MetricType::New();
     bool isMetricMutualInformation = false;
+
     if (isMetricMutualInformation)
     {
         metric->SetUseMovingImageGradientFilter(false);
@@ -283,11 +286,13 @@ MetricType::Pointer GetMetric(BinaryImageType::Pointer maskFixed, BinaryImageTyp
     return metric;
 }
 
-TransformType::Pointer GetCenteredTransform(Double2ImageType::Pointer fixed, Double2ImageType::Pointer moving)
+TransformType::Pointer GetCenteredTransform(Double2ImageType::Pointer fixed, 
+                                            Double2ImageType::Pointer moving)
 {
     TransformType::Pointer    transform = TransformType::New();
     TransformInitializerType::Pointer initializer =
-        TransformInitializerType::New();
+                                TransformInitializerType::New();
+
     initializer->SetTransform(transform);
     initializer->SetFixedImage(fixed);
     initializer->SetMovingImage(moving);
@@ -297,7 +302,8 @@ TransformType::Pointer GetCenteredTransform(Double2ImageType::Pointer fixed, Dou
     return transform;
 }
 
-RegistrationType::Pointer GetRegistration(OptimizerType::Pointer optimizer, MetricType::Pointer metric,
+RegistrationType::Pointer GetRegistration(
+    OptimizerType::Pointer optimizer, MetricType::Pointer metric,
     Double2ImageType::Pointer fixedDouble, Double2ImageType::Pointer movingDouble,
     TransformType::Pointer transform)
 {
@@ -362,6 +368,7 @@ Short2ImageType::Pointer CastImageDoubleShort(Double2ImageType::Pointer source)
 void CopyFromImageToBuffer(Short2ImageType::Pointer image, ImageBuffer buffer)
 {
     auto pointerToCastedImage = image->GetBufferPointer();
+    
     auto size = image->GetLargestPossibleRegion().GetSize();
     auto width = size[0];
     auto height = size[1];
@@ -415,7 +422,6 @@ extern "C" __declspec(dllexport) int itkMotionCorrection(ImageBuffer fixedRescal
     
     auto movingSource = GetITKImageFromBuffer(movingSourceBuffer, widthScale, heightScale);
     auto movingSourceDouble = CastImageShortDouble(movingSource);
-    //auto resampledImage = ResampleImage(movingDouble, registration->GetModifiableTransform());
     auto resampledImage = ResampleImage(movingSourceDouble, registration->GetModifiableTransform());
     auto castedImage = CastImageDoubleShort(resampledImage);
     
